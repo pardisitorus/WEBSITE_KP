@@ -55,28 +55,64 @@ LOCAL_FILE = "desa1_riau.csv"
 
 @st.cache_resource
 def init_ee():
-    """Koneksi Hybrid: Mencoba Secrets (Cloud) lalu Local (Laptop)"""
-    # 1. Coba Mode Cloud (Secrets) - Untuk Deployment Online
-    try:
-        if "EARTHENGINE_TOKEN" in st.secrets:
-            import json
-            from google.oauth2.service_account import Credentials
-            service_account_info = json.loads(st.secrets["EARTHENGINE_TOKEN"])
-            credentials = Credentials.from_service_account_info(service_account_info)
-            ee.Initialize(credentials=credentials)
-            return True
-    except: 
-        pass
+    """Koneksi Hybrid: Secrets (Cloud), refresh token, lalu auth lokal."""
+    project_id = st.secrets.get("GEE_PROJECT", "website-kp")
+    errors = []
 
-    # 2. Coba Mode Local (Laptop)
+    # 1) Service Account JSON untuk deployment cloud
     try:
-        # Gunakan Project ID 'website-kp' sesuai dashboard Anda
-        ee.Initialize(project='website-kp')
+        service_token = st.secrets.get("EARTHENGINE_TOKEN")
+        if service_token:
+            import json
+            from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+
+            service_account_info = (
+                json.loads(service_token) if isinstance(service_token, str) else dict(service_token)
+            )
+            credentials = ServiceAccountCredentials.from_service_account_info(
+                service_account_info,
+                scopes=ee.oauth.SCOPES,
+            )
+            ee.Initialize(credentials=credentials, project=project_id)
+            return True
+    except Exception as e:
+        errors.append(f"Service account gagal: {e}")
+
+    # 2) Refresh token (tanpa perlu `earthengine authenticate`)
+    try:
+        refresh_token = str(st.secrets.get("GEE_REFRESH_TOKEN", "")).strip()
+        if refresh_token and "paste_your_refresh_token_here" not in refresh_token.lower():
+            from google.oauth2.credentials import Credentials as UserCredentials
+
+            credentials = UserCredentials(
+                token=None,
+                refresh_token=refresh_token,
+                token_uri=ee.oauth.TOKEN_URI,
+                client_id=ee.oauth.CLIENT_ID,
+                client_secret=ee.oauth.CLIENT_SECRET,
+                scopes=ee.oauth.SCOPES,
+            )
+            ee.Initialize(credentials=credentials, project=project_id)
+            return True
+    except Exception as e:
+        errors.append(f"Refresh token gagal: {e}")
+
+    # 3) Fallback auth lokal (laptop/CLI)
+    try:
+        ee.Initialize(project=project_id)
         return True
     except Exception as e:
-        st.sidebar.error(f"Gagal Login GEE: {e}")
-        st.sidebar.warning("Koneksi GEE Gagal. Pastikan sudah login di terminal.")
-        return False
+        errors.append(f"Auth lokal gagal: {e}")
+
+    st.sidebar.error("Gagal Login GEE. Tidak ada metode autentikasi yang berhasil.")
+    for err in errors:
+        st.sidebar.caption(f"- {err}")
+    st.sidebar.warning(
+        "Cloud/Server: isi `.streamlit/secrets.toml` dengan `EARTHENGINE_TOKEN` "
+        "(service account JSON) atau `GEE_REFRESH_TOKEN`."
+    )
+    st.sidebar.warning("Laptop lokal: jalankan `earthengine authenticate`, lalu restart app.")
+    return False
 
 
 @st.cache_data
@@ -402,8 +438,8 @@ def main():
         if init_ee():
             st.success("🛰️ GEE SATELIT: ONLINE")
         else:
-            st.error("🔌 GEE OFFLINE (Cek Token)")
-            st.warning("Jika di laptop, buka Terminal dan ketik: `earthengine authenticate`")
+            st.error("GEE OFFLINE (Autentikasi belum valid)")
+            st.warning("Isi secret GEE atau jalankan `earthengine authenticate` jika mode lokal.")
             st.stop()
             
         if st.button("🔄 TARIK DATA BARU"):
