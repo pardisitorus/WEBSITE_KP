@@ -34,12 +34,24 @@ MAX_WORKERS = 5  # Jumlah thread paralel
 @st.cache_resource
 def init_ee():
     """Koneksi Hybrid: Secrets (Cloud), refresh token, lalu auth lokal."""
-    project_id = st.secrets.get("GEE_PROJECT", "website-kp")
+    def read_secret(key):
+        if key in st.secrets:
+            return st.secrets.get(key)
+        # Coba baca dari section umum kalau user menaruh di nested table TOML.
+        for section in ("gee", "earthengine", "general", "default", "secrets"):
+            sec = st.secrets.get(section)
+            if hasattr(sec, "get"):
+                val = sec.get(key)
+                if val:
+                    return val
+        return None
+
+    project_id = read_secret("GEE_PROJECT") or "website-kp"
     errors = []
 
     # 1) Service Account JSON untuk deployment cloud
     try:
-        service_token = st.secrets.get("EARTHENGINE_TOKEN")
+        service_token = read_secret("EARTHENGINE_TOKEN")
         if service_token:
             import json
             from google.oauth2.service_account import Credentials as ServiceAccountCredentials
@@ -53,14 +65,17 @@ def init_ee():
             )
             ee.Initialize(credentials=credentials, project=project_id)
             return True
+        else:
+            errors.append("EARTHENGINE_TOKEN tidak ditemukan di secrets.")
     except Exception as e:
         errors.append(f"Service account gagal: {e}")
 
     # 2) Refresh token (tanpa perlu `earthengine authenticate`)
     try:
-        refresh_token = str(st.secrets.get("GEE_REFRESH_TOKEN", "")).strip()
+        refresh_token = str(read_secret("GEE_REFRESH_TOKEN") or "").strip()
         if refresh_token and "paste_your_refresh_token_here" not in refresh_token.lower():
             from google.oauth2.credentials import Credentials as UserCredentials
+            from google.auth.transport.requests import Request
 
             credentials = UserCredentials(
                 token=None,
@@ -70,8 +85,14 @@ def init_ee():
                 client_secret=ee.oauth.CLIENT_SECRET,
                 scopes=ee.oauth.SCOPES,
             )
+            # Paksa refresh token di awal agar error kredensial langsung terlihat.
+            credentials.refresh(Request())
             ee.Initialize(credentials=credentials, project=project_id)
             return True
+        elif not refresh_token:
+            errors.append("GEE_REFRESH_TOKEN tidak ditemukan di secrets.")
+        else:
+            errors.append("GEE_REFRESH_TOKEN masih placeholder.")
     except Exception as e:
         errors.append(f"Refresh token gagal: {e}")
 
@@ -96,6 +117,12 @@ def init_ee():
         "(service account JSON) atau `GEE_REFRESH_TOKEN`."
     )
     st.sidebar.warning("Laptop lokal: jalankan `earthengine authenticate`, lalu restart app.")
+    st.sidebar.caption(
+        "Deteksi secrets -> "
+        f"GEE_PROJECT: {'ada' if bool(read_secret('GEE_PROJECT')) else 'tidak'}, "
+        f"GEE_REFRESH_TOKEN: {'ada' if bool(str(read_secret('GEE_REFRESH_TOKEN') or '').strip()) else 'tidak'}, "
+        f"EARTHENGINE_TOKEN: {'ada' if bool(read_secret('EARTHENGINE_TOKEN')) else 'tidak'}"
+    )
     return False
 
 # ==============================================================================
