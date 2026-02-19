@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forest Fire Risk Map - Riau Province</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        #map {
+            height: 600px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .legend {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border-radius: 3px;
+        }
+        .village-info {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .risk-high { background-color: #dc3545; }
+        .risk-medium { background-color: #ffc107; }
+        .risk-low { background-color: #28a745; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success">
+        <div class="container">
+            <a class="navbar-brand" href="#">🔥 Forest Fire Risk Map - Riau Province</a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="#education">Education</a>
+                <a class="nav-link" href="{{ url_for('admin_login') }}">Admin</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Interactive Fire Risk Map</h5>
+                        <div id="map"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card mb-3">
+                    <div class="card-header">
+                        <h6>Risk Legend</h6>
+                    </div>
+                    <div class="card-body legend">
+                        <div class="legend-item">
+                            <div class="legend-color risk-high"></div>
+                            <span>High Risk (>0.7)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color risk-medium"></div>
+                            <span>Medium Risk (0.5-0.7)</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color risk-low"></div>
+                            <span>Low Risk (<0.5)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h6>Top 10 High-Risk Villages</h6>
+                    </div>
+                    <div class="card-body village-info">
+                        <div id="top-villages" class="list-group">
+                            <div class="text-center">
+                                <div class="spinner-border" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+    </div>
+
+    <!-- Education Modal -->
+    <div class="modal fade" id="educationModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Fire Prevention Education</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="risk-select" class="form-label">Select Risk Level</label>
+                        <select class="form-select" id="risk-select">
+                            <option value="high">High Risk</option>
+                            <option value="medium">Medium Risk</option>
+                            <option value="low">Low Risk</option>
+                        </select>
+                    </div>
+                    <div id="education-content">
+                        <p>Select a risk level to see prevention recommendations.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Initialize map
+        const map = L.map('map').setView([0.5, 101.5], 8);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        let villageLayer;
+        let predictions = {};
+
+        // Load village boundaries and predictions
+        Promise.all([
+            fetch('/api/predictions').then(r => r.json()),
+            fetch('/static/desa1_riau.geojson').then(r => r.json())
+        ]).then(([predData, geoData]) => {
+            predictions = {};
+            predData.villages.forEach(v => {
+                predictions[v.id] = v;
+            });
+
+            // Update top villages list
+            updateTopVillages(predData.top_10);
+
+            // Add village layer
+            villageLayer = L.geoJSON(geoData, {
+                style: function(feature) {
+                    const villageId = feature.properties.OBJECTID;
+                    const village = predictions[villageId];
+                    let color = '#808080'; // default gray
+
+                    if (village) {
+                        if (village.risk_level === 'high') color = '#dc3545';
+                        else if (village.risk_level === 'medium') color = '#ffc107';
+                        else if (village.risk_level === 'low') color = '#28a745';
+                    }
+
+                    return {
+                        color: '#000',
+                        weight: 1,
+                        fillColor: color,
+                        fillOpacity: 0.7
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    layer.on('click', function() {
+                        const villageId = feature.properties.OBJECTID;
+                        const village = predictions[villageId];
+
+                        if (village) {
+                            const popupContent = `
+                                <div style="min-width: 200px;">
+                                    <h6 style="margin-bottom: 8px;">${village.name}</h6>
+                                    <p style="margin: 4px 0;"><strong>Kabupaten:</strong> ${village.kabupaten}</p>
+                                    <p style="margin: 4px 0;"><strong>Risk Probability:</strong> ${(village.probability * 100).toFixed(1)}%</p>
+                                    <p style="margin: 4px 0;"><strong>Risk Level:</strong>
+                                        <span class="badge bg-${village.risk_level === 'high' ? 'danger' : village.risk_level === 'medium' ? 'warning' : 'success'}"
+                                              style="font-size: 0.8em;">
+                                            ${village.risk_level.toUpperCase()}
+                                        </span>
+                                    </p>
+                                    <a href="/education/${village.risk_level}" class="btn btn-sm btn-outline-primary" target="_blank">Prevention Tips</a>
+                                </div>
+                            `;
+                            layer.bindPopup(popupContent).openPopup();
+                        }
+                    });
+                }
+            }).addTo(map);
+
+            map.fitBounds(villageLayer.getBounds());
+        }).catch(error => {
+            console.error('Error loading data:', error);
+        });
+
+        function updateTopVillages(topVillages) {
+            const container = document.getElementById('top-villages');
+            container.innerHTML = '';
+
+            topVillages.forEach((village, index) => {
+                const item = document.createElement('a');
+                item.href = '#';
+                item.className = 'list-group-item list-group-item-action';
+                item.onclick = () => {
+                    // Find the village in predictions and show popup
+                    const villageData = predictions[village.id];
+                    if (villageData && villageLayer) {
+                        // Find the layer for this village and trigger popup
+                        villageLayer.eachLayer(function(layer) {
+                            if (layer.feature.properties.OBJECTID === village.id) {
+                                layer.openPopup();
+                                map.setView(layer.getBounds().getCenter(), 12);
+                            }
+                        });
+                    }
+                };
+                item.innerHTML = `
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">${index + 1}. ${village.name}</h6>
+                        <small>${village.kabupaten}</small>
+                    </div>
+                    <p class="mb-1">Risk: ${(village.probability * 100).toFixed(1)}% (${village.risk_level})</p>
+                `;
+                container.appendChild(item);
+            });
+        }
+
+        function showVillageDetails(villageId) {
+            fetch(`/api/village/${villageId}`)
+                .then(response => response.json())
+                .then(data => {
+                    const details = document.getElementById('village-details');
+                    details.innerHTML = `
+                        <h6>${data.name}</h6>
+                        <p><strong>Kabupaten:</strong> ${data.kabupaten}</p>
+                        <p><strong>Kecamatan:</strong> ${data.kecamatan}</p>
+                        <p><strong>Fire Risk Probability:</strong> ${(data.probability * 100).toFixed(1)}%</p>
+                        <p><strong>Risk Level:</strong>
+                            <span class="badge bg-${data.risk_level === 'high' ? 'danger' : data.risk_level === 'medium' ? 'warning' : 'success'}">
+                                ${data.risk_level.toUpperCase()}
+                            </span>
+                        </p>
+                        <h6>Prevention Recommendations:</h6>
+                        <ul>
+                            ${data.recommendations.map(rec => `<li>${rec}</li>`).join('')}
+                        </ul>
+                        <a href="/education/${data.risk_level}" class="btn btn-sm btn-outline-primary">Learn More</a>
+                    `;
+                })
+                .catch(error => {
+                    console.error('Error loading village details:', error);
+                });
+        }
+
+        // Education modal
+        document.getElementById('risk-select').addEventListener('change', function() {
+            const riskLevel = this.value;
+            fetch(`/education/${riskLevel}`)
+                .then(response => response.text())
+                .then(html => {
+                    // Extract the recommendations from the HTML
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(html, 'text/html');
+                    const recommendations = doc.querySelectorAll('li');
+                    const content = document.getElementById('education-content');
+                    content.innerHTML = '<ul>' + Array.from(recommendations).map(li => li.outerHTML).join('') + '</ul>';
+                });
+        });
+
+        // Show education modal when education link is clicked
+        document.querySelector('a[href="#education"]').addEventListener('click', function(e) {
+            e.preventDefault();
+            new bootstrap.Modal(document.getElementById('educationModal')).show();
+        });
+    </script>
+</body>
+</html>
