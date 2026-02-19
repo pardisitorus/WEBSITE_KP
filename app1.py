@@ -410,10 +410,19 @@ def calculate_risk(df):
 
     # Feature engineering sama persis dengan MODEL_KNN.py
     model_eps = 0.01
-    df['Rain_Log'] = np.log1p(rain_num)
-    df['X1_Fuel_Dryness'] = (lst_num * (1 - ndvi_num)) * (df['Rain_Log'] + model_eps)
-    df['X2_Thermal_Kinetic'] = lst_num ** 2
-    df['X3_Hydro_Stress'] = lst_num * (df['Rain_Log'] + model_eps)
+    rain_log_live = np.log1p(rain_num)
+    rain_log_train_compatible = np.zeros_like(rain_num)
+
+    def build_knn_features(rain_log_input):
+        return pd.DataFrame({
+            'X1_Fuel_Dryness': (lst_num * (1 - ndvi_num)) * (rain_log_input + model_eps),
+            'X2_Thermal_Kinetic': lst_num ** 2,
+            'X3_Hydro_Stress': lst_num * (rain_log_input + model_eps),
+        })
+
+    X_pred_live = build_knn_features(rain_log_live)
+    df[['X1_Fuel_Dryness', 'X2_Thermal_Kinetic', 'X3_Hydro_Stress']] = X_pred_live
+    df['Rain_Log'] = rain_log_live
 
     # Bersihkan inf/nan
     df = df.replace([np.inf, -np.inf], 0).fillna(0)
@@ -424,21 +433,49 @@ def calculate_risk(df):
 
     if knn_model is not None:
         try:
-            feature_cols = ['X1_Fuel_Dryness', 'X2_Thermal_Kinetic', 'X3_Hydro_Stress']
-            X_pred = df[feature_cols].copy()
-
-            proba_matrix = knn_model.predict_proba(X_pred)
             classes = list(getattr(knn_model, "classes_", []))
-            pos_index = classes.index(1) if 1 in classes else (proba_matrix.shape[1] - 1)
+            pos_index = classes.index(1) if 1 in classes else 0
 
-            df['prob_pct'] = (proba_matrix[:, pos_index] * 100).round(1)
-            df['pred_class'] = knn_model.predict(X_pred).astype(int)
-            df['risk_engine'] = f"KNN ({Path(model_path).name})"
+            proba_live = knn_model.predict_proba(X_pred_live)[:, pos_index]
+            pred_live = knn_model.predict(X_pred_live).astype(int)
+
+            # Jika semua probabilitas nol/konstan, pakai mode kompatibel data train.
+            is_degenerate_live = bool(np.allclose(proba_live, proba_live[0])) or bool(np.allclose(proba_live, 0))
+
+            if is_degenerate_live:
+                X_pred_compat = build_knn_features(rain_log_train_compatible)
+                proba_compat = knn_model.predict_proba(X_pred_compat)[:, pos_index]
+                pred_compat = knn_model.predict(X_pred_compat).astype(int)
+
+                is_degenerate_compat = bool(np.allclose(proba_compat, proba_compat[0])) or bool(np.allclose(proba_compat, 0))
+
+                if not is_degenerate_compat:
+                    df['prob_pct'] = (proba_compat * 100).round(1)
+                    df['pred_class'] = pred_compat
+                    df['risk_engine'] = f"KNN-Compat ({Path(model_path).name})"
+                    st.info("Model KNN memakai mode kompatibel data train (Rain=0) agar hasil tidak 0 semua.")
+                else:
+                    use_fallback_formula = True
+                    model_error = "Output KNN degeneratif (0/konstan) pada data live dan mode kompatibel."
+            else:
+                df['prob_pct'] = (proba_live * 100).round(1)
+                df['pred_class'] = pred_live
+                df['risk_engine'] = f"KNN ({Path(model_path).name})"
         except Exception as e:
             model_error = f"Prediksi KNN gagal: {e}"
             use_fallback_formula = True
     else:
         use_fallback_formula = True
+
+    # Guardrail: jika output KNN tetap dominan 0/kurang variatif, balik ke heuristik.
+    if not use_fallback_formula and 'prob_pct' in df.columns:
+        zero_ratio = float((df['prob_pct'] <= 0).mean())
+        spread = float(df['prob_pct'].max() - df['prob_pct'].min())
+        if zero_ratio >= 0.6 or spread < 1.0:
+            model_error = (
+                f"Output KNN tidak stabil (zero_ratio={zero_ratio:.0%}, spread={spread:.2f})."
+            )
+            use_fallback_formula = True
 
     # Fallback aman jika model gagal diload/prediksi
     if use_fallback_formula:
