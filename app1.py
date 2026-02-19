@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+from pathlib import Path
 import pydeck as pdk
 import shapely.wkt
 import shapely.geometry
 import ee
 import altair as alt
+import joblib
+import gdown
 from datetime import datetime, timedelta
 
 # ==============================================================================
@@ -50,6 +53,31 @@ st.markdown("""
 # GANTI PATH SESUAI LOKASI ANDA
 DATA_URL = "https://drive.google.com/uc?id=1jmBB6Dv36aRnbDkj-cuZ154M0E3tzhOQ"
 LOCAL_FILE = "desa1_riau.csv"
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_CANDIDATES = [
+    BASE_DIR / "models" / "initial_model.pkl",
+    BASE_DIR / "model_knn.pkl",
+]
+
+
+@st.cache_resource
+def load_knn_model():
+    """Load model KNN hasil training (MODEL_KNN.py) dari file .pkl."""
+    load_errors = []
+    for model_path in MODEL_CANDIDATES:
+        if not model_path.exists():
+            continue
+        try:
+            model = joblib.load(model_path)
+            if not hasattr(model, "predict") or not hasattr(model, "predict_proba"):
+                raise ValueError("Model tidak mendukung predict/predict_proba.")
+            return model, str(model_path), None
+        except Exception as e:
+            load_errors.append(f"{model_path.name}: {e}")
+
+    if load_errors:
+        return None, None, " | ".join(load_errors)
+    return None, None, "File model KNN tidak ditemukan."
 
 
 
@@ -375,30 +403,54 @@ def calculate_risk(df):
         if col not in df.columns:
             df[col] = 0
 
-    # --- Interaksi Variabel Baru ---
-    # Hindari log(0)
-    df['Rain_Log'] = np.log(df['Rain'] + EPS)
+    # Konversi numerik aman
+    lst_num = pd.to_numeric(df['LST'], errors='coerce').fillna(0.0)
+    ndvi_num = pd.to_numeric(df['NDVI'], errors='coerce').fillna(0.0)
+    rain_num = pd.to_numeric(df['Rain'], errors='coerce').fillna(0.0).clip(lower=0)
 
-    df['X1_Fuel_Dryness'] = (df['LST'] * (1 - df['NDVI'])) * (df['Rain_Log'] + EPS)
-    df['X2_Thermal_Kinetic'] = df['LST'] ** 2
-    df['X3_Hydro_Stress'] = df['LST'] * (df['Rain_Log'] + EPS)
+    # Feature engineering sama persis dengan MODEL_KNN.py
+    model_eps = 0.01
+    df['Rain_Log'] = np.log1p(rain_num)
+    df['X1_Fuel_Dryness'] = (lst_num * (1 - ndvi_num)) * (df['Rain_Log'] + model_eps)
+    df['X2_Thermal_Kinetic'] = lst_num ** 2
+    df['X3_Hydro_Stress'] = lst_num * (df['Rain_Log'] + model_eps)
 
     # Bersihkan inf/nan
     df = df.replace([np.inf, -np.inf], 0).fillna(0)
 
-    # --- Risiko Fisika Klasik (untuk level & warna) ---
-    # Normalisasi Suhu 25-40
-    norm_lst = ((df['LST'] - 25) / (40 - 25)).clip(0, 1)
+    # Prediksi probabilitas dengan model KNN
+    knn_model, model_path, model_error = load_knn_model()
+    use_fallback_formula = False
 
-    # Normalisasi Hujan (lebih banyak hujan = lebih aman)
-    norm_rain = (1 - df['Rain'] / 300).clip(0, 1)
+    if knn_model is not None:
+        try:
+            feature_cols = ['X1_Fuel_Dryness', 'X2_Thermal_Kinetic', 'X3_Hydro_Stress']
+            X_pred = df[feature_cols].copy()
 
-    # Normalisasi Vegetasi (lebih kering = lebih bahaya)
-    norm_dry = (1 - df['NDVI']).clip(0, 1)
+            proba_matrix = knn_model.predict_proba(X_pred)
+            classes = list(getattr(knn_model, "classes_", []))
+            pos_index = classes.index(1) if 1 in classes else (proba_matrix.shape[1] - 1)
 
-    # Rumus risiko
-    risk_score = 0.4 * norm_rain + 0.4 * norm_lst + 0.2 * norm_dry
-    df['prob_pct'] = (risk_score * 100).round(1)
+            df['prob_pct'] = (proba_matrix[:, pos_index] * 100).round(1)
+            df['pred_class'] = knn_model.predict(X_pred).astype(int)
+            df['risk_engine'] = f"KNN ({Path(model_path).name})"
+        except Exception as e:
+            model_error = f"Prediksi KNN gagal: {e}"
+            use_fallback_formula = True
+    else:
+        use_fallback_formula = True
+
+    # Fallback aman jika model gagal diload/prediksi
+    if use_fallback_formula:
+        norm_lst = ((lst_num - 25) / (40 - 25)).clip(0, 1)
+        norm_rain = (1 - rain_num / 300).clip(0, 1)
+        norm_dry = (1 - ndvi_num).clip(0, 1)
+        risk_score = 0.4 * norm_rain + 0.4 * norm_lst + 0.2 * norm_dry
+        df['prob_pct'] = (risk_score * 100).round(1)
+        df['pred_class'] = (df['prob_pct'] >= 50).astype(int)
+        df['risk_engine'] = "HEURISTIK"
+        if model_error:
+            st.warning(f"Model KNN tidak tersedia, fallback ke rumus heuristik. Detail: {model_error}")
 
     # Level & Warna
     def get_level(p):
@@ -469,6 +521,14 @@ def main():
             st.warning("Isi secret GEE atau jalankan `earthengine authenticate` jika mode lokal.")
             st.stop()
             
+        knn_model, knn_path, knn_err = load_knn_model()
+        if knn_model is not None:
+            st.success(f"MODEL KNN AKTIF: {Path(knn_path).name}")
+        else:
+            st.warning("MODEL KNN tidak ditemukan, fallback ke heuristik.")
+            if knn_err:
+                st.caption(knn_err)
+
         if st.button("🔄 TARIK DATA BARU"):
             st.cache_data.clear()
             st.rerun()
