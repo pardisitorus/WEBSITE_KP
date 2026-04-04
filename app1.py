@@ -80,6 +80,41 @@ def load_knn_model():
     return None, None, "File model KNN tidak ditemukan."
 
 
+def set_model_runtime_status(mode, summary, detail=None):
+    """Simpan status mesin prediksi final agar UI sidebar konsisten."""
+    st.session_state["model_runtime_status"] = {
+        "mode": mode,
+        "summary": summary,
+        "detail": detail or "",
+    }
+
+
+def render_model_status(knn_model, knn_path, knn_err):
+    """
+    Tampilkan status model sinkron:
+    - Jika status runtime sudah ada, tampilkan itu.
+    - Jika belum ada, tampilkan status pra-validasi (file model terdeteksi / tidak).
+    """
+    runtime_status = st.session_state.get("model_runtime_status")
+    if runtime_status:
+        if runtime_status.get("mode") == "knn":
+            st.success(runtime_status.get("summary", "MODEL KNN AKTIF"))
+        else:
+            st.warning(runtime_status.get("summary", "MODEL KNN NONAKTIF: fallback ke heuristik."))
+
+        detail = runtime_status.get("detail")
+        if detail:
+            st.caption(detail)
+        return
+
+    if knn_model is not None:
+        st.info(f"MODEL KNN TERDETEKSI: {Path(knn_path).name} (menunggu validasi output).")
+    else:
+        st.warning("MODEL KNN tidak ditemukan, fallback ke heuristik.")
+        if knn_err:
+            st.caption(knn_err)
+
+
 
 @st.cache_resource
 def init_ee():
@@ -430,6 +465,7 @@ def calculate_risk(df):
     # Prediksi probabilitas dengan model KNN
     knn_model, model_path, model_error = load_knn_model()
     use_fallback_formula = False
+    runtime_detail = ""
 
     if knn_model is not None:
         try:
@@ -454,6 +490,7 @@ def calculate_risk(df):
                     df['pred_class'] = pred_compat
                     df['risk_engine'] = f"KNN-Compat ({Path(model_path).name})"
                     st.info("Model KNN memakai mode kompatibel data train (Rain=0) agar hasil tidak 0 semua.")
+                    runtime_detail = "Mode inferensi: kompatibel train (Rain=0)."
                 else:
                     use_fallback_formula = True
                     model_error = "Output KNN degeneratif (0/konstan) pada data live dan mode kompatibel."
@@ -461,6 +498,7 @@ def calculate_risk(df):
                 df['prob_pct'] = (proba_live * 100).round(1)
                 df['pred_class'] = pred_live
                 df['risk_engine'] = f"KNN ({Path(model_path).name})"
+                runtime_detail = "Mode inferensi: live."
         except Exception as e:
             model_error = f"Prediksi KNN gagal: {e}"
             use_fallback_formula = True
@@ -486,8 +524,19 @@ def calculate_risk(df):
         df['prob_pct'] = (risk_score * 100).round(1)
         df['pred_class'] = (df['prob_pct'] >= 50).astype(int)
         df['risk_engine'] = "HEURISTIK"
-        if model_error:
-            st.warning(f"Model KNN tidak tersedia, fallback ke rumus heuristik. Detail: {model_error}")
+        fallback_detail = model_error or "Model KNN tidak tersedia."
+        set_model_runtime_status(
+            "heuristic",
+            "MODEL KNN NONAKTIF: fallback ke rumus heuristik.",
+            fallback_detail,
+        )
+    else:
+        model_name = Path(model_path).name if model_path else "model_tidak_diketahui.pkl"
+        set_model_runtime_status(
+            "knn",
+            f"MODEL KNN AKTIF: {model_name}",
+            runtime_detail,
+        )
 
     # Level & Warna
     def get_level(p):
@@ -559,15 +608,12 @@ def main():
             st.stop()
             
         knn_model, knn_path, knn_err = load_knn_model()
-        if knn_model is not None:
-            st.success(f"MODEL KNN AKTIF: {Path(knn_path).name}")
-        else:
-            st.warning("MODEL KNN tidak ditemukan, fallback ke heuristik.")
-            if knn_err:
-                st.caption(knn_err)
+        render_model_status(knn_model, knn_path, knn_err)
 
-        if st.button("🔄 TARIK DATA BARU"):
+        if st.button("REFRESH DATA"):
             st.cache_data.clear()
+            st.session_state.pop("data_monitor", None)
+            st.session_state.pop("model_runtime_status", None)
             st.rerun()
             
         st.markdown("---")
@@ -607,6 +653,16 @@ def main():
         st.session_state.data_monitor = calculate_risk(df_sat)
             
     df = st.session_state.data_monitor
+
+    runtime_status = st.session_state.get("model_runtime_status")
+    if runtime_status:
+        if runtime_status.get("mode") == "knn":
+            st.success(runtime_status.get("summary", "MODEL KNN AKTIF"))
+        else:
+            st.warning(runtime_status.get("summary", "MODEL KNN NONAKTIF: fallback ke heuristik."))
+        detail = runtime_status.get("detail")
+        if detail:
+            st.caption(f"Detail: {detail}")
     
     # TANGGAL DATA - Tampilkan per Variabel
     st.markdown(f"""
@@ -854,3 +910,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
