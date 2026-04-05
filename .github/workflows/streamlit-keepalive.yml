@@ -1,0 +1,51 @@
+name: Streamlit Ghost Visitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: streamlit-ghost-visitor
+  cancel-in-progress: true
+
+jobs:
+  visit-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Streamlit app URL
+        shell: bash
+        env:
+          SECRET_URL: ${{ secrets.STREAMLIT_APP_URL }}
+          VARIABLE_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          APP_URL="${SECRET_URL:-$VARIABLE_URL}"
+
+          if [ -z "$APP_URL" ]; then
+            echo "Missing STREAMLIT_APP_URL. Set it as a repository Secret or Variable."
+            exit 1
+          fi
+
+          echo "STREAMLIT_APP_URL=$APP_URL" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          npm install --no-save --no-package-lock --no-fund --no-audit playwright
+          npx playwright install --with-deps chromium
+
+      - name: Visit and wake Streamlit app
+        env:
+          STREAMLIT_APP_URL: ${{ env.STREAMLIT_APP_URL }}
+        run: node .github/scripts/streamlit-keepalive.mjs
